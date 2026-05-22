@@ -9,21 +9,26 @@ fi
 cd "$(dirname "$0")"
 
 export JAQUA_WORK_DIR="/kaggle/working"
-export JAQUA_OUTPUT_DIR="/kaggle/working/output_tpu"
+export JAQUA_OUTPUT_DIR="/kaggle/working/output_cuda"
 export HF_HOME="/kaggle/temp/hf_cache"
-export PJRT_DEVICE=TPU
-export XLA_USE_SPMD=1
-export XLA_USE_BF16=1
 export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_NO_TF=1
 export TRANSFORMERS_NO_TORCHVISION=1
 export USE_TF=0
+export CUDA_VISIBLE_DEVICES="0,1"
 
 mkdir -p "${JAQUA_OUTPUT_DIR}/logs" "${JAQUA_OUTPUT_DIR}/gguf" "${HF_HOME}" /kaggle/temp
 : > "${JAQUA_OUTPUT_DIR}/logs/train.log"
 
 echo "[setup] Installing dependencies and building llama.cpp"
 bash setup.sh
+
+NPROC="$(python - <<'PY'
+import torch
+print(torch.cuda.device_count() if torch.cuda.is_available() else 1)
+PY
+)"
+echo "[setup] torchrun processes: ${NPROC}"
 
 quantize_bin() {
   if [[ -x /kaggle/temp/llama.cpp/build/bin/llama-quantize ]]; then
@@ -153,7 +158,7 @@ run_variant() {
   echo "[train] ${artifact}"
   echo "[train] base=${base_model}"
   echo "[train] data=${dataset} split=${split}"
-  python lora_train.py 2>&1 | tee -a "${JAQUA_OUTPUT_DIR}/logs/train.log"
+  torchrun --standalone --nproc_per_node="${NPROC}" lora_train.py 2>&1 | tee -a "${JAQUA_OUTPUT_DIR}/logs/train.log"
 
   echo "[merge] ${artifact}"
   python lora_merge.py
@@ -186,21 +191,21 @@ REASON_WEB_DATASET="open-r1/OpenR1-Math-220k,BitAgent/tool_calling"
 REASON_WEB_SPLIT="train,train"
 
 run_variant 1.5b base "${BASE_15_MODEL}" "${BASE_DATASET}" "${BASE_SPLIT}" \
-  2400 512 8 1 1e-4 16 32 100000
+  2400 512 2 4 1e-4 16 32 100000
 
 run_variant 1.5b web "${BASE_15_MODEL}" "${WEB_DATASET}" "${WEB_SPLIT}" \
-  1200 512 8 1 8e-5 16 32 80000
+  1200 512 2 4 8e-5 16 32 80000
 
 run_variant 2.7b reason "${REASON_27_MODEL}" "${REASON_DATASET}" "${REASON_SPLIT}" \
-  1800 768 8 2 8e-5 32 64 80000
+  1800 768 1 8 8e-5 32 64 80000
 
 REASON_MERGED="${JAQUA_OUTPUT_DIR}/merged/jaqua-2.7b-reason-F16"
 run_variant 2.7b reason-web "${REASON_MERGED}" "${REASON_WEB_DATASET}" "${REASON_WEB_SPLIT}" \
-  1000 768 8 2 5e-5 16 32 80000
+  1000 768 1 8 5e-5 16 32 80000
 
 echo "[final] Package artifacts"
-tar -C "${JAQUA_OUTPUT_DIR}" -czf "${JAQUA_OUTPUT_DIR}/jaqua_tpu_artifacts.tar.gz" gguf adapters logs
+tar -C "${JAQUA_OUTPUT_DIR}" -czf "${JAQUA_OUTPUT_DIR}/jaqua_cuda_artifacts.tar.gz" gguf adapters logs
 
-echo "Jaqua TPU LoRA pipeline complete."
+echo "Jaqua CUDA LoRA pipeline complete."
 echo "GGUF outputs:"
 ls -lh "${JAQUA_OUTPUT_DIR}/gguf" | sed -n '1,200p'
