@@ -12,6 +12,7 @@ export JAQUA_WORK_DIR="/kaggle/working"
 export JAQUA_OUTPUT_DIR="/kaggle/working/output_tpu"
 export HF_HOME="/kaggle/temp/hf_cache"
 export PJRT_DEVICE=TPU
+export XLA_USE_SPMD=1
 export XLA_USE_BF16=1
 export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_NO_TF=1
@@ -185,17 +186,17 @@ REASON_WEB_DATASET="open-r1/OpenR1-Math-220k,BitAgent/tool_calling"
 REASON_WEB_SPLIT="train,train"
 
 run_variant 1.5b base "${BASE_15_MODEL}" "${BASE_DATASET}" "${BASE_SPLIT}" \
-  2400 512 4 2 1e-4 16 32 100000
+  2400 512 8 1 1e-4 16 32 100000
 
 run_variant 1.5b web "${BASE_15_MODEL}" "${WEB_DATASET}" "${WEB_SPLIT}" \
-  1200 512 4 2 8e-5 16 32 80000
+  1200 512 8 1 8e-5 16 32 80000
 
 run_variant 2.7b reason "${REASON_27_MODEL}" "${REASON_DATASET}" "${REASON_SPLIT}" \
-  1800 768 2 4 8e-5 32 64 80000
+  1800 768 8 2 8e-5 32 64 80000
 
 REASON_MERGED="${JAQUA_OUTPUT_DIR}/merged/jaqua-2.7b-reason-F16"
 run_variant 2.7b reason-web "${REASON_MERGED}" "${REASON_WEB_DATASET}" "${REASON_WEB_SPLIT}" \
-  1000 768 2 4 5e-5 16 32 80000
+  1000 768 8 2 5e-5 16 32 80000
 
 echo "[final] Package artifacts"
 tar -C "${JAQUA_OUTPUT_DIR}" -czf "${JAQUA_OUTPUT_DIR}/jaqua_tpu_artifacts.tar.gz" gguf adapters logs

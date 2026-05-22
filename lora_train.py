@@ -3,15 +3,17 @@ import os
 from itertools import islice
 from typing import Dict, List
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets, load_dataset
 from peft import LoraConfig, TaskType, get_peft_model
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.parallel_loader as pl
-import torch_xla.distributed.xla_multiprocessing as xmp
+import torch_xla.distributed.spmd as xs
+import torch_xla.runtime as xr
 
 from config import JaquaConfig
 
@@ -146,18 +148,20 @@ def _collate_batch(tokenizer, examples: List[Dict]) -> Dict[str, torch.Tensor]:
     return batch
 
 
-def _train_worker(index: int) -> None:
+def main() -> None:
+    xr.use_spmd()
     cfg = JaquaConfig()
     os.makedirs(cfg.adapter_dir, exist_ok=True)
 
     device = xm.xla_device()
-    rank = xm.get_ordinal()
-    world_size = xm.xrt_world_size()
-    if rank == 0:
-        print(f"[lora-tpu] artifact={cfg.artifact_name}")
-        print(f"[lora-tpu] base_model={cfg.base_model_id}")
-        print(f"[lora-tpu] dataset={cfg.dataset_id} split={cfg.dataset_split}")
-        print(f"[lora-tpu] world_size={world_size}")
+    num_devices = xr.global_runtime_device_count()
+    device_ids = np.array(range(num_devices))
+    mesh = xs.Mesh(device_ids, (num_devices,), ("data",))
+
+    print(f"[lora-tpu] artifact={cfg.artifact_name}")
+    print(f"[lora-tpu] base_model={cfg.base_model_id}")
+    print(f"[lora-tpu] dataset={cfg.dataset_id} split={cfg.dataset_split}")
+    print(f"[lora-tpu] spmd_devices={num_devices}")
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.base_model_id, use_fast=True)
     if tokenizer.pad_token is None:
@@ -185,11 +189,10 @@ def _train_worker(index: int) -> None:
 
     ds = _load_training_dataset(cfg, tokenizer)
     ds = ds.filter(lambda row: any(label != -100 for label in row["labels"]) and len(row["input_ids"]) > 0)
-    sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank, shuffle=True)
     loader = DataLoader(
         ds,
         batch_size=cfg.micro_batch_size,
-        sampler=sampler,
+        shuffle=True,
         drop_last=True,
         collate_fn=lambda examples: _collate_batch(tokenizer, examples),
     )
@@ -200,13 +203,12 @@ def _train_worker(index: int) -> None:
     epoch = 0
     while step < cfg.lora_steps:
         epoch += 1
-        sampler.set_epoch(epoch)
         para_loader = pl.MpDeviceLoader(loader, device)
         for i, batch in enumerate(para_loader, start=1):
             step += 1
-            input_ids = batch["input_ids"]
-            attention_mask = batch["attention_mask"]
-            labels = batch["labels"]
+            input_ids = xs.mark_sharding(batch["input_ids"], mesh, ("data", None))
+            attention_mask = xs.mark_sharding(batch["attention_mask"], mesh, ("data", None))
+            labels = xs.mark_sharding(batch["labels"], mesh, ("data", None))
 
             out = model(input_ids=input_ids, attention_mask=attention_mask)
             shift_logits = out.logits[:, :-1, :].contiguous().float()
@@ -227,23 +229,18 @@ def _train_worker(index: int) -> None:
             else:
                 xm.mark_step()
 
-            if step % cfg.log_every == 0 and rank == 0:
+            if step % cfg.log_every == 0:
                 print(f"[lora] step={step}/{cfg.lora_steps} batch={i}/{len(loader)} loss={float(loss.detach().cpu()):.4f}")
 
             if step >= cfg.lora_steps:
                 break
 
     xm.rendezvous(f"{cfg.artifact_name}-final-save")
-    if rank == 0:
-        saver = model.to("cpu")
-        saver.save_pretrained(cfg.adapter_dir)
-        tokenizer.save_pretrained(cfg.adapter_dir)
-        print(f"[lora] training finished -> {cfg.adapter_dir}")
+    saver = model.to("cpu")
+    saver.save_pretrained(cfg.adapter_dir)
+    tokenizer.save_pretrained(cfg.adapter_dir)
+    print(f"[lora] training finished -> {cfg.adapter_dir}")
     xm.rendezvous(f"{cfg.artifact_name}-done")
-
-
-def main() -> None:
-    xmp.spawn(_train_worker)
 
 
 if __name__ == "__main__":
