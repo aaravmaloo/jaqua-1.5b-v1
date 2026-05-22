@@ -170,7 +170,7 @@ def main() -> None:
     model = AutoModelForCausalLM.from_pretrained(
         cfg.base_model_id,
         torch_dtype=torch.bfloat16,
-        attn_implementation="sdpa",
+        attn_implementation="eager",
     )
     model.config.use_cache = False
 
@@ -207,10 +207,9 @@ def main() -> None:
         for i, batch in enumerate(para_loader, start=1):
             step += 1
             input_ids = xs.mark_sharding(batch["input_ids"], mesh, ("data", None))
-            attention_mask = xs.mark_sharding(batch["attention_mask"], mesh, ("data", None))
             labels = xs.mark_sharding(batch["labels"], mesh, ("data", None))
 
-            out = model(input_ids=input_ids, attention_mask=attention_mask)
+            out = model(input_ids=input_ids)
             shift_logits = out.logits[:, :-1, :].contiguous().float()
             shift_labels = labels[:, 1:].contiguous()
             loss = F.cross_entropy(
