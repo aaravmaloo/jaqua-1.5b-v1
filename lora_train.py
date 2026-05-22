@@ -206,12 +206,14 @@ def main() -> None:
         para_loader = pl.MpDeviceLoader(loader, device)
         for i, batch in enumerate(para_loader, start=1):
             step += 1
-            input_ids = xs.mark_sharding(batch["input_ids"], mesh, ("data", None))
-            labels = xs.mark_sharding(batch["labels"], mesh, ("data", None))
+            input_ids = batch["input_ids"]
+            labels = batch["labels"]
+            shift_labels = labels[:, 1:].contiguous()
+            input_ids = xs.mark_sharding(input_ids, mesh, ("data", None))
+            shift_labels = xs.mark_sharding(shift_labels, mesh, ("data", None))
 
             out = model(input_ids=input_ids)
             shift_logits = out.logits[:, :-1, :].contiguous().float()
-            shift_labels = labels[:, 1:].contiguous()
             loss = F.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1),
