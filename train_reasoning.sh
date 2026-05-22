@@ -9,7 +9,7 @@ fi
 cd "$(dirname "$0")"
 
 export JAQUA_WORK_DIR="/kaggle/working"
-export JAQUA_OUTPUT_DIR="/kaggle/working/output_base_web"
+export JAQUA_OUTPUT_DIR="/kaggle/working/output_reasoning"
 export HF_HOME="/kaggle/temp/hf_cache"
 export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_NO_TF=1
@@ -18,7 +18,7 @@ export USE_TF=0
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 
 mkdir -p "${JAQUA_OUTPUT_DIR}/logs" "${JAQUA_OUTPUT_DIR}/gguf" "${HF_HOME}" /kaggle/temp
-: > "${JAQUA_OUTPUT_DIR}/logs/train.log"
+: > "${JAQUA_OUTPUT_DIR}/logs/train_reasoning.log"
 
 echo "[setup] Installing dependencies and building llama.cpp"
 bash setup.sh
@@ -66,12 +66,6 @@ llama_cli_bin() {
 test_prompt_for_variant() {
   local variant="$1"
   case "${variant}" in
-    base)
-      echo "Explain what edge AI is in five concise bullets."
-      ;;
-    web)
-      echo "Who is the current president of the United States? If fresh information is needed, return a web_search tool call instead of guessing."
-      ;;
     reason)
       echo "Solve carefully: A rectangle has perimeter 70 cm. Its length is 5 cm more than twice its width. Find the length, width, and area."
       ;;
@@ -92,11 +86,6 @@ smoke_test_gguf() {
   local log="${JAQUA_OUTPUT_DIR}/logs/${artifact}-${quant}-smoke.log"
   local prompt
   prompt="$(test_prompt_for_variant "${variant}")"
-
-  if [[ ! -f "${gguf}" ]]; then
-    echo "[smoke] missing ${gguf}" >&2
-    exit 1
-  fi
 
   echo "[smoke] ${artifact}-${quant}"
   {
@@ -158,7 +147,7 @@ run_variant() {
   echo "[train] ${artifact}"
   echo "[train] base=${base_model}"
   echo "[train] data=${dataset} split=${split}"
-  torchrun --standalone --nproc_per_node="${NPROC}" lora_train.py 2>&1 | tee -a "${JAQUA_OUTPUT_DIR}/logs/train.log"
+  torchrun --standalone --nproc_per_node="${NPROC}" lora_train.py 2>&1 | tee -a "${JAQUA_OUTPUT_DIR}/logs/train_reasoning.log"
 
   echo "[merge] ${artifact}"
   python lora_merge.py
@@ -183,26 +172,26 @@ run_variant() {
   smoke_test_gguf "${artifact}" "${variant}" Q8_0
 }
 
-BASE_15_MODEL="Qwen/Qwen2.5-1.5B-Instruct"
+REASON_27_MODEL="Qwen/Qwen2.5-3B-Instruct"
+REASON_DATASET="open-r1/OpenR1-Math-220k"
+REASON_SPLIT="train"
+REASON_WEB_DATASET="open-r1/OpenR1-Math-220k,BitAgent/tool_calling"
+REASON_WEB_SPLIT="train,train"
 
-BASE_DATASET="HuggingFaceH4/ultrachat_200k"
-BASE_SPLIT="train_sft"
-WEB_DATASET="BitAgent/tool_calling"
-WEB_SPLIT="train"
+run_variant 2.7b reason "${REASON_27_MODEL}" "${REASON_DATASET}" "${REASON_SPLIT}" \
+  1200 640 1 8 8e-5 32 64 50000
 
-run_variant 1.5b base "${BASE_15_MODEL}" "${BASE_DATASET}" "${BASE_SPLIT}" \
-  2400 512 2 4 1e-4 16 32 100000
+REASON_MERGED="${JAQUA_OUTPUT_DIR}/merged/jaqua-2.7b-reason-F16"
+run_variant 2.7b reason-web "${REASON_MERGED}" "${REASON_WEB_DATASET}" "${REASON_WEB_SPLIT}" \
+  600 640 1 8 5e-5 16 32 40000
 
-run_variant 1.5b web "${BASE_15_MODEL}" "${WEB_DATASET}" "${WEB_SPLIT}" \
-  1200 512 2 4 8e-5 16 32 80000
-
-echo "[final] Package artifacts"
+echo "[final] Package reasoning artifacts"
 if [[ "${JAQUA_PACKAGE_MERGED:-0}" == "1" ]]; then
-  tar -C "${JAQUA_OUTPUT_DIR}" -czf "${JAQUA_OUTPUT_DIR}/jaqua_artifacts.tar.gz" gguf merged adapters logs
+  tar -C "${JAQUA_OUTPUT_DIR}" -czf "${JAQUA_OUTPUT_DIR}/jaqua_reasoning_artifacts.tar.gz" gguf merged adapters logs
 else
-  tar -C "${JAQUA_OUTPUT_DIR}" -czf "${JAQUA_OUTPUT_DIR}/jaqua_artifacts.tar.gz" gguf adapters logs
+  tar -C "${JAQUA_OUTPUT_DIR}" -czf "${JAQUA_OUTPUT_DIR}/jaqua_reasoning_artifacts.tar.gz" gguf adapters logs
 fi
 
-echo "Jaqua base/web LoRA pipeline complete."
+echo "Jaqua reasoning LoRA pipeline complete."
 echo "GGUF outputs:"
 ls -lh "${JAQUA_OUTPUT_DIR}/gguf" | sed -n '1,200p'

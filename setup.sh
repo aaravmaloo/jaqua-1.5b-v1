@@ -8,7 +8,7 @@ export TRANSFORMERS_CACHE="${HF_HOME}"
 export HUGGINGFACE_HUB_CACHE="${HF_HOME}"
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 
-mkdir -p "${HF_HOME}" /kaggle/working/output /kaggle/temp
+mkdir -p "${HF_HOME}" "${JAQUA_OUTPUT_DIR:-/kaggle/working/output}" /kaggle/temp
 
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements.txt
