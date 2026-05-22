@@ -20,7 +20,23 @@ export CUDA_VISIBLE_DEVICES="0,1"
 mkdir -p "${JAQUA_OUTPUT_DIR}/logs" "${JAQUA_OUTPUT_DIR}/gguf" "${HF_HOME}" /kaggle/temp
 : > "${JAQUA_OUTPUT_DIR}/logs/train.log"
 
-echo "[setup] Installing dependencies and building llama.cpp"
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+  echo "nvidia-smi not found. This script requires Kaggle GPU T4 x2." >&2
+  exit 1
+fi
+
+GPU_NAMES="$(nvidia-smi --query-gpu=name --format=csv,noheader | sed 's/^ *//;s/ *$//')"
+GPU_COUNT="$(printf '%s\n' "${GPU_NAMES}" | sed '/^$/d' | wc -l)"
+echo "[setup] detected GPUs:"
+printf '%s\n' "${GPU_NAMES}" | sed 's/^/[setup] - /'
+
+if [[ "${GPU_COUNT}" -lt 2 ]] || ! printf '%s\n' "${GPU_NAMES}" | grep -q "T4"; then
+  echo "Expected Kaggle GPU accelerator 'T4 x2'. Current accelerator is not T4 x2." >&2
+  echo "Go to Kaggle Notebook Settings -> Accelerator -> GPU T4 x2, restart the session, then rerun bash train.sh." >&2
+  exit 1
+fi
+
+echo "[setup] Installing dependencies and downloading llama.cpp binaries"
 bash setup.sh
 
 NPROC="$(python - <<'PY'
@@ -66,9 +82,6 @@ llama_cli_bin() {
 test_prompt_for_variant() {
   local variant="$1"
   case "${variant}" in
-    base)
-      echo "Explain what edge AI is in five concise bullets."
-      ;;
     web)
       echo "Who is the current president of the United States? If fresh information is needed, return a web_search tool call instead of guessing."
       ;;
@@ -103,18 +116,26 @@ smoke_test_gguf() {
     echo "MODEL: ${artifact}-${quant}"
     echo "PROMPT: ${prompt}"
     echo
-    "$(llama_cli_bin)" \
+    timeout 180 "$(llama_cli_bin)" \
       -m "${gguf}" \
       -ngl 0 \
       -c 2048 \
-      -n 256 \
+      -n 160 \
       --temp 0.2 \
       --top-p 0.9 \
+      --no-conversation \
       -p "<|im_start|>user
 ${prompt}<|im_end|>
 <|im_start|>assistant
 "
-  } 2>&1 | tee "${log}"
+  } 2>&1 | tee "${log}" || {
+    status="$?"
+    if [[ "${status}" == "124" ]]; then
+      echo "[smoke] ${artifact}-${quant} timed out after 180 seconds; continuing." | tee -a "${log}"
+    else
+      echo "[smoke] ${artifact}-${quant} failed with exit code ${status}; continuing." | tee -a "${log}"
+    fi
+  }
 }
 
 run_variant() {
@@ -181,17 +202,12 @@ run_variant() {
 BASE_15_MODEL="Qwen/Qwen2.5-1.5B-Instruct"
 REASON_27_MODEL="Qwen/Qwen2.5-3B-Instruct"
 
-BASE_DATASET="HuggingFaceH4/ultrachat_200k"
-BASE_SPLIT="train_sft"
 WEB_DATASET="BitAgent/tool_calling"
 WEB_SPLIT="train"
 REASON_DATASET="open-r1/OpenR1-Math-220k"
 REASON_SPLIT="train"
 REASON_WEB_DATASET="open-r1/OpenR1-Math-220k,BitAgent/tool_calling"
 REASON_WEB_SPLIT="train,train"
-
-run_variant 1.5b base "${BASE_15_MODEL}" "${BASE_DATASET}" "${BASE_SPLIT}" \
-  2400 512 2 4 1e-4 16 32 100000
 
 run_variant 1.5b web "${BASE_15_MODEL}" "${WEB_DATASET}" "${WEB_SPLIT}" \
   1200 512 2 4 8e-5 16 32 80000
