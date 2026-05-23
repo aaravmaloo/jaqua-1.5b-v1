@@ -69,7 +69,13 @@ PY
       ;;
   esac
 
-  find /kaggle/temp/llama-bin-extract -type f \( -name 'llama-cli' -o -name 'llama-quantize' -o -name 'quantize' \) -exec cp {} "${LLAMA_BIN_DIR}/" \;
+  find /kaggle/temp/llama-bin-extract -type f \( \
+    -name 'llama-cli' -o \
+    -name 'llama-quantize' -o \
+    -name 'quantize' -o \
+    -name '*.so' -o \
+    -name '*.so.*' \
+  \) -exec cp {} "${LLAMA_BIN_DIR}/" \;
   chmod +x "${LLAMA_BIN_DIR}/"* || true
 
   if [[ ! -x "${LLAMA_BIN_DIR}/llama-cli" ]] || [[ ! -x "${LLAMA_BIN_DIR}/llama-quantize" && ! -x "${LLAMA_BIN_DIR}/quantize" ]]; then
@@ -84,7 +90,7 @@ PY
   ln -sfn "${LLAMA_SRC_DIR}/convert_hf_to_gguf.py" "${LLAMA_ROOT}/convert_hf_to_gguf.py"
 }
 
-if [[ ! -x "${LLAMA_BIN_DIR}/llama-cli" ]] || [[ ! -f "${LLAMA_SRC_DIR}/convert_hf_to_gguf.py" ]]; then
+if [[ ! -x "${LLAMA_BIN_DIR}/llama-cli" ]] || [[ ! -f "${LLAMA_SRC_DIR}/convert_hf_to_gguf.py" ]] || ! compgen -G "${LLAMA_BIN_DIR}/*.so*" >/dev/null; then
   download_llama_release
 else
   echo "[setup] using existing llama.cpp binaries in ${LLAMA_BIN_DIR}"
