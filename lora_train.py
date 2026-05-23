@@ -182,8 +182,10 @@ def main() -> None:
         cfg.base_model_id,
         torch_dtype=_cuda_dtype(),
         attn_implementation="sdpa",
+        low_cpu_mem_usage=True,
     )
     model.config.use_cache = False
+    model.gradient_checkpointing_enable()
 
     lora_cfg = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
@@ -194,6 +196,7 @@ def main() -> None:
         bias="none",
     )
     model = get_peft_model(model, lora_cfg)
+    model.enable_input_require_grads()
     model.to(device)
     model.train()
 

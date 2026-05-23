@@ -149,6 +149,7 @@ run_variant() {
   local lora_r="${11}"
   local lora_alpha="${12}"
   local max_samples="${13}"
+  local nproc="${14:-${NPROC}}"
 
   export JAQUA_PARAM_LABEL="${param_label}"
   export JAQUA_VARIANT="${variant}"
@@ -176,7 +177,7 @@ run_variant() {
   echo "[train] ${artifact}"
   echo "[train] base=${base_model}"
   echo "[train] data=${dataset} split=${split}"
-  torchrun --standalone --nproc_per_node="${NPROC}" lora_train.py 2>&1 | tee -a "${JAQUA_OUTPUT_DIR}/logs/train.log"
+  torchrun --standalone --nproc_per_node="${nproc}" lora_train.py 2>&1 | tee -a "${JAQUA_OUTPUT_DIR}/logs/train.log"
 
   echo "[merge] ${artifact}"
   python lora_merge.py
@@ -202,7 +203,7 @@ REASON_DATASET="open-r1/OpenR1-Math-220k"
 REASON_SPLIT="train"
 
 run_variant 3b reason "${REASON_27_MODEL}" "${REASON_DATASET}" "${REASON_SPLIT}" \
-  1800 768 1 8 8e-5 32 64 80000
+  1800 512 1 8 8e-5 16 32 60000 1
 
 echo "[final] Package artifacts"
 tar -C "${JAQUA_OUTPUT_DIR}" -czf "${JAQUA_OUTPUT_DIR}/jaqua_cuda_artifacts.tar.gz" gguf adapters logs
