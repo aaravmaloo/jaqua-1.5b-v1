@@ -1,11 +1,13 @@
 import json
 import os
+import gc
 from itertools import islice
 from typing import Dict, List
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+import bitsandbytes as bnb
 from datasets import Dataset, concatenate_datasets, load_dataset
 from peft import LoraConfig, TaskType, get_peft_model
 from peft import prepare_model_for_kbit_training
@@ -22,6 +24,40 @@ def _cuda_dtype() -> torch.dtype:
 
     major, _ = torch.cuda.get_device_capability()
     return torch.bfloat16 if major >= 8 and torch.cuda.is_bf16_supported() else torch.float16
+
+
+def _memory_snapshot() -> str:
+    parts = []
+    if torch.cuda.is_available():
+        for idx in range(torch.cuda.device_count()):
+            free, total = torch.cuda.mem_get_info(idx)
+            parts.append(f"cuda:{idx} free={free / 1024**3:.1f}GiB total={total / 1024**3:.1f}GiB")
+    return "; ".join(parts) if parts else "cuda=unavailable"
+
+
+def _qlora_device_map(local_rank: int):
+    requested = os.getenv("JAQUA_DEVICE_MAP", "single").strip().lower()
+    if requested == "auto":
+        return "auto"
+    return {"": local_rank}
+
+
+def _qlora_max_memory():
+    if os.getenv("JAQUA_DEVICE_MAP", "single").strip().lower() != "auto" or not torch.cuda.is_available():
+        return None
+
+    gpu_limit = os.getenv("JAQUA_MAX_MEMORY_GPU", "13GiB")
+    cpu_limit = os.getenv("JAQUA_MAX_MEMORY_CPU", "24GiB")
+    memory = {idx: gpu_limit for idx in range(torch.cuda.device_count())}
+    memory["cpu"] = cpu_limit
+    return memory
+
+
+def _model_input_device(model, fallback: str):
+    embeddings = model.get_input_embeddings()
+    if embeddings is not None:
+        return embeddings.weight.device
+    return next(model.parameters()).device if any(True for _ in model.parameters()) else torch.device(fallback)
 
 
 def _clean_messages(messages: List[Dict]) -> List[Dict[str, str]]:
@@ -174,6 +210,7 @@ def main() -> None:
         print(f"[lora-cuda] base_model={cfg.base_model_id}")
         print(f"[lora-cuda] dataset={cfg.dataset_id} split={cfg.dataset_split}")
         print(f"[lora-cuda] world_size={world_size}")
+        print(f"[lora-cuda] memory_before_load={_memory_snapshot()}")
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.base_model_id, use_fast=True)
     if tokenizer.pad_token is None:
@@ -182,6 +219,9 @@ def main() -> None:
     use_qlora = os.getenv("JAQUA_QLORA", "0") == "1"
     if rank == 0:
         print(f"[lora-cuda] qlora={use_qlora}")
+        if use_qlora:
+            print(f"[lora-cuda] device_map={os.getenv('JAQUA_DEVICE_MAP', 'single')}")
+            print(f"[lora-cuda] max_memory={_qlora_max_memory()}")
     quantization_config = None
     if use_qlora:
         quantization_config = BitsAndBytesConfig(
@@ -197,12 +237,18 @@ def main() -> None:
         attn_implementation="sdpa",
         low_cpu_mem_usage=True,
         quantization_config=quantization_config,
-        device_map={"": local_rank} if use_qlora and device == "cuda" else None,
+        device_map=_qlora_device_map(local_rank) if use_qlora and device == "cuda" else None,
+        max_memory=_qlora_max_memory() if use_qlora and device == "cuda" else None,
     )
     model.config.use_cache = False
-    model.gradient_checkpointing_enable()
     if use_qlora:
         model = prepare_model_for_kbit_training(model)
+    model.gradient_checkpointing_enable()
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    if rank == 0:
+        print(f"[lora-cuda] memory_after_load={_memory_snapshot()}")
 
     lora_cfg = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
@@ -217,6 +263,8 @@ def main() -> None:
     if not use_qlora:
         model.to(device)
     model.train()
+    if rank == 0:
+        print(f"[lora-cuda] memory_after_lora={_memory_snapshot()}")
 
     ds = _load_training_dataset(cfg, tokenizer)
     ds = ds.filter(lambda row: any(label != -100 for label in row["labels"]) and len(row["input_ids"]) > 0)
@@ -233,7 +281,11 @@ def main() -> None:
     if world_size > 1 and not use_qlora:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
 
-    optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=cfg.lora_lr, weight_decay=0.0)
+    trainable_params = (p for p in model.parameters() if p.requires_grad)
+    if use_qlora and os.getenv("JAQUA_OPTIMIZER", "") == "paged_adamw_8bit":
+        optimizer = bnb.optim.PagedAdamW8bit(trainable_params, lr=cfg.lora_lr, weight_decay=0.0)
+    else:
+        optimizer = torch.optim.AdamW(trainable_params, lr=cfg.lora_lr, weight_decay=0.0)
     step = 0
     optimizer.zero_grad(set_to_none=True)
     epoch = 0
@@ -243,13 +295,14 @@ def main() -> None:
             sampler.set_epoch(epoch)
         for i, batch in enumerate(loader, start=1):
             step += 1
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
+            input_device = _model_input_device(model, device)
+            input_ids = batch["input_ids"].to(input_device)
+            attention_mask = batch["attention_mask"].to(input_device)
+            labels = batch["labels"].to(input_device)
 
             out = model(input_ids=input_ids, attention_mask=attention_mask)
             shift_logits = out.logits[:, :-1, :].contiguous().float()
-            shift_labels = labels[:, 1:].contiguous()
+            shift_labels = labels[:, 1:].contiguous().to(shift_logits.device)
             loss = F.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1),

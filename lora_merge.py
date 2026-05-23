@@ -15,8 +15,9 @@ def main() -> None:
 
     base = AutoModelForCausalLM.from_pretrained(
         cfg.base_model_id,
-        torch_dtype=torch.float32,
+        torch_dtype=torch.float16,
         attn_implementation="sdpa",
+        low_cpu_mem_usage=True,
     )
     model = PeftModel.from_pretrained(base, cfg.adapter_dir)
     model = model.merge_and_unload()

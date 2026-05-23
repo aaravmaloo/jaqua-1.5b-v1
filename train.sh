@@ -16,6 +16,7 @@ export TRANSFORMERS_NO_TF=1
 export TRANSFORMERS_NO_TORCHVISION=1
 export USE_TF=0
 export CUDA_VISIBLE_DEVICES="0,1"
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export LD_LIBRARY_PATH="/kaggle/temp/llama.cpp/build/bin:${LD_LIBRARY_PATH:-}"
 
 mkdir -p "${JAQUA_OUTPUT_DIR}/logs" "${JAQUA_OUTPUT_DIR}/gguf" "${HF_HOME}" /kaggle/temp
@@ -45,7 +46,7 @@ import torch
 print(torch.cuda.device_count() if torch.cuda.is_available() else 1)
 PY
 )"
-echo "[setup] torchrun processes: ${NPROC}"
+echo "[setup] detected CUDA devices: ${NPROC}"
 
 quantize_bin() {
   if [[ -x /kaggle/temp/llama.cpp/build/bin/llama-quantize ]]; then
@@ -168,6 +169,10 @@ run_variant() {
   export JAQUA_LOG_EVERY="20"
   export JAQUA_SAVE_EVERY="200"
   export JAQUA_QLORA="1"
+  export JAQUA_DEVICE_MAP="auto"
+  export JAQUA_MAX_MEMORY_GPU="13GiB"
+  export JAQUA_MAX_MEMORY_CPU="24GiB"
+  export JAQUA_OPTIMIZER="paged_adamw_8bit"
 
   local artifact="jaqua-${param_label}-${variant}"
   local merged_dir="${JAQUA_OUTPUT_DIR}/merged/${artifact}-F16"
@@ -178,6 +183,7 @@ run_variant() {
   echo "[train] ${artifact}"
   echo "[train] base=${base_model}"
   echo "[train] data=${dataset} split=${split}"
+  echo "[train] launcher=$([[ "${nproc}" == "1" ]] && echo python || echo torchrun) nproc=${nproc}"
   if [[ "${nproc}" == "1" ]]; then
     python lora_train.py 2>&1 | tee -a "${JAQUA_OUTPUT_DIR}/logs/train.log"
   else
@@ -208,7 +214,7 @@ REASON_DATASET="open-r1/OpenR1-Math-220k"
 REASON_SPLIT="train"
 
 run_variant 3b reason "${REASON_27_MODEL}" "${REASON_DATASET}" "${REASON_SPLIT}" \
-  1800 512 1 8 8e-5 16 32 60000 1
+  1500 384 1 16 7e-5 8 16 40000 1
 
 echo "[final] Package artifacts"
 tar -C "${JAQUA_OUTPUT_DIR}" -czf "${JAQUA_OUTPUT_DIR}/jaqua_cuda_artifacts.tar.gz" gguf adapters logs
